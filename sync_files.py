@@ -68,7 +68,7 @@ class SyncFiles:
                 dst_file = dst if os.path.isfile(dst) else os.path.join(dst, os.path.basename(path))
                 src_to_dst[path] = dst_file
             elif os.path.isdir(path):
-                for f in os.path.listdir(path):
+                for f in os.listdir(path):
                     src_file = os.path.join(path, f)
                     dst_file = dst if os.path.isfile(dst) else os.path.join(dst, f)
                     src_to_dst[src_file] = dst_file
