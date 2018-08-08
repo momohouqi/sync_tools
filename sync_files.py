@@ -18,10 +18,12 @@ import shutil
 import logging
 import shelve
 import argparse
+import re
+from datetime import datetime
 
 class SyncFiles:
     """src and dst maybe file or dir"""
-    def __init__(self, src = "", dst = "", setting_file = ""):
+    def __init__(self, src = "", dst = "", setting_file = "", force = False):
         self._init_log()
         if (src or dst) and setting_file:
             logging.error("--src, --dst can't be with --file")
@@ -30,8 +32,16 @@ class SyncFiles:
         self._src = src
         self._dst = dst
         self._setting_file = setting_file
+        self._force_copy = force
+
+        self._vars = {}
+
+        if setting_file:
+            self._parse_setting_file()
 
         self._init_shelve()
+        self._sync_success_count = 0
+        self._skipped_sync_count = 0
 
     def _init_log(selfs):
         LOG_FORMAT = "[%(levelname)s] %(message)s"
@@ -41,11 +51,44 @@ class SyncFiles:
         current_dir = os.path.abspath(os.path.dirname(__file__))
         self._shelve = shelve.open(os.path.join(current_dir, ".sync.shelve"), flag = "c")
 
+    def _is_comment_out_line(self, line):
+        return line.strip().startswith('//')
+
+    def _parse_setting_file(self):
+        with open(self._setting_file, 'r') as f:
+            for line in f.readlines():
+                line = line.strip()
+                if not self._is_comment_out_line(line) and '=' in line:
+                    name, value = line.split('=')
+                    if name and value:
+                        self._vars[name] = value
+
+    def _print_statistics(self):
+        logging.info('===>Sync:{0}; Skipped:{1}\n'.format(self._sync_success_count, self._skipped_sync_count))
+
     def sync(self):
-        if self._setting_file:
-            return self._sync_by_setting_file()
-        else:
-            return self._sync(self._src, self._dst)
+        try:
+            if self._setting_file:
+                return self._sync_by_setting_file()
+            else:
+                return self._sync(self._src, self._dst)
+        finally:
+            self._print_statistics()
+
+    def _replace_var_with_value(self, line):
+        def get_var_pattern(line):
+            return re.search("\$[a-zA-Z_]+", line)
+
+        var_pattern = get_var_pattern(line)
+        while var_pattern:
+            var = var_pattern.group(0)[1:]
+            if var not in self._vars:
+                logging.error("[Error] var doesn't exist:{0}".format(var))
+                sys.exit(-1)
+            line = line.replace('$' + var, self._vars[var])
+            var_pattern = get_var_pattern(line)
+        return line
+
 
     def _sync_by_setting_file(self):
         if not os.path.exists(self._setting_file):
@@ -54,6 +97,10 @@ class SyncFiles:
 
         with open(self._setting_file, "r") as f:
             for line in f.readlines():
+                line = line.strip()
+                if self._is_comment_out_line(line) or ':::' not in line:
+                    continue
+                line = self._replace_var_with_value(line)
                 src, dst = line.strip().split(":::")
                 self._sync(src, dst)
 
@@ -81,27 +128,33 @@ class SyncFiles:
         return 0
 
     def _sync_one_file(self, src, dst):
-        from datetime import datetime
-        last_sync_mtime_str = self._shelve.get(src, "")
+        logging.debug("sync file: " + src + " to " + dst)
+
         current_mtime_str = os.path.getmtime(src)
-        if last_sync_mtime_str != current_mtime_str:
-            if os.path.exists(dst):
-                timedelta = datetime.fromtimestamp(current_mtime_str) - datetime.fromtimestamp(os.path.getmtime(dst))
-                need_update = timedelta.seconds > 1
-                if not need_update:
-                    logging.debug("dst,src mtime same , skipped")
+        if not self._force_copy:
+            last_sync_mtime_str = self._shelve.get(src, "")
+            if last_sync_mtime_str != current_mtime_str:
+                if os.path.exists(dst):
+                    timedelta = datetime.fromtimestamp(current_mtime_str) - datetime.fromtimestamp(os.path.getmtime(dst))
+                    need_update = timedelta.seconds > 1
+                    if not need_update:
+                        logging.debug("dst,src mtime same , skipped")
+                else:
+                    need_update = True
             else:
-                need_update = True
+                need_update = False
+                logging.debug("mtime not change, skipped")
         else:
-            need_update = False
-            logging.debug("mtime not change, skipped")
+            need_update = True
 
         if need_update:
             shutil.copy2(src, dst)
             self._shelve[src] = current_mtime_str
             logging.info("[SyncOK] sync file successfully: {0}".format(os.path.basename(src)))
+            self._sync_success_count += 1
         else:
             logging.info("[Skipped] the modified time is the same, skipped: '{0}' ".format(os.path.basename(src)))
+            self._skipped_sync_count += 1
 
 def main():
     parser = argparse.ArgumentParser(description="Sync files by modified time")
@@ -109,10 +162,11 @@ def main():
     parser.add_argument("--src",dest="src", type=str, help = "files or paths, devided by ','")
     parser.add_argument("--dst",dest="dst", type=str, help = "file or dir, destination path")
     parser.add_argument("--file", dest="file", type = str, help = "each line of the file is src:::dst")
+    parser.add_argument("--force", dest="force", action="store_true", help = "force copy ignore the mtime")
 
     options = parser.parse_args()
 
-    sync_files = SyncFiles(src = options.src, dst = options.dst, setting_file = options.file)
+    sync_files = SyncFiles(src = options.src, dst = options.dst, setting_file = options.file, force = options.force)
     return sync_files.sync()
 
 
