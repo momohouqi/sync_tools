@@ -21,6 +21,79 @@ import argparse
 import re
 from datetime import datetime
 
+
+class SettingFile:
+    """Setting file parser"""
+    FROM = "FROM"
+    PORT = "PORT"
+    def __init__(self, setting_file):
+        self._setting_file = setting_file
+        self._vars = None
+
+    @classmethod
+    def is_comment_out_line(cls, line):
+        return line.strip().startswith('//')
+
+    @classmethod
+    def is_assignment_line(cls, line):
+        return '=' in line
+
+    def get_defined_vars(self, var_name):
+        if self._vars is None:
+            self._vars = {}
+            with open(self._setting_file, 'r') as f:
+                for line in f.readlines():
+                    line = line.strip()
+                    if not self.is_comment_out_line(line) and self.is_assignment_line(line):
+                        name, value = line.split('=')
+                        if name and value:
+                            self._vars[name] = value
+
+        return self._vars[var_name].strip()
+
+    def _replace_var_with_value(self, line):
+        def get_var_pattern(line):
+            return re.search("\$[a-zA-Z_]+", line)
+
+        var_pattern = get_var_pattern(line)
+        while var_pattern:
+            var = var_pattern.group(0)[1:]
+            line = line.replace('$' + var, self.get_defined_vars(var))
+            var_pattern = get_var_pattern(line)
+        return line
+
+    def get_src_dst_pairs(self):
+        def handle_pair_flag_in_line(line):
+            line = self._replace_var_with_value(line)
+            src, dst = line.strip().split(":::")
+            return src, dst
+
+        def handle_only_src_in_line(line):
+            src = line
+            from_path = self.get_defined_vars(self.FROM)
+            port = self.get_defined_vars(self.PORT)
+            if not line.startswith(from_path):
+                raise Exception("Wrong line:{}".format(line))
+            #dst = os.path.join(port, 'app', line[len(from_path):])
+            dst1=port + "\\app\\" + line[len(from_path):]
+            return src, dst1
+
+        src2dst = {}
+        with open(self._setting_file, "r") as f:
+            for line in f.readlines():
+                line = line.strip()
+                if not line or self.is_comment_out_line(line) or self.is_assignment_line(line):
+                    continue
+                if ':::' in line:
+                    src, dst = handle_pair_flag_in_line(line)
+                else:
+                    src, dst = handle_only_src_in_line(line)
+                    print "===src:{}, dst:{}".format(src, dst)
+
+                src2dst[src] = dst
+        return src2dst
+
+
 class SyncFiles:
     """src and dst maybe file or dir"""
     def __init__(self, src = "", dst = "", setting_file = "", force = False):
@@ -31,13 +104,13 @@ class SyncFiles:
 
         self._src = src
         self._dst = dst
-        self._setting_file = setting_file
+        self._setting_file_parser = None
         self._force_copy = force
 
         self._vars = {}
 
         if setting_file:
-            self._parse_setting_file()
+            self._setting_file_parser = SettingFile(setting_file)
 
         self._init_shelve()
         self._sync_success_count = 0
@@ -51,61 +124,24 @@ class SyncFiles:
         current_dir = os.path.abspath(os.path.dirname(__file__))
         self._shelve = shelve.open(os.path.join(current_dir, ".sync.shelve"), flag = "c")
 
-    def _is_comment_out_line(self, line):
-        return line.strip().startswith('//')
-
-    def _parse_setting_file(self):
-        with open(self._setting_file, 'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                if not self._is_comment_out_line(line) and '=' in line:
-                    name, value = line.split('=')
-                    if name and value:
-                        self._vars[name] = value
-
     def _print_statistics(self):
         logging.info('===>Sync:{0}; Skipped:{1}\n'.format(self._sync_success_count, self._skipped_sync_count))
 
     def sync(self):
         try:
-            if self._setting_file:
+            if self._setting_file_parser:
                 return self._sync_by_setting_file()
             else:
                 return self._sync(self._src, self._dst)
         finally:
             self._print_statistics()
 
-    def _replace_var_with_value(self, line):
-        def get_var_pattern(line):
-            return re.search("\$[a-zA-Z_]+", line)
-
-        var_pattern = get_var_pattern(line)
-        while var_pattern:
-            var = var_pattern.group(0)[1:]
-            if var not in self._vars:
-                logging.error("[Error] var doesn't exist:{0}".format(var))
-                sys.exit(-1)
-            line = line.replace('$' + var, self._vars[var])
-            var_pattern = get_var_pattern(line)
-        return line
-
-
     def _sync_by_setting_file(self):
-        if not os.path.exists(self._setting_file):
-            logging.error("[Error] setting file doesn't exist:{0}".format(self._setting_file))
-            return -1
-
-        with open(self._setting_file, "r") as f:
-            for line in f.readlines():
-                line = line.strip()
-                if self._is_comment_out_line(line) or ':::' not in line:
-                    continue
-                line = self._replace_var_with_value(line)
-                src, dst = line.strip().split(":::")
-                self._sync(src, dst)
+        src2dst = self._setting_file_parser.get_src_dst_pairs()
+        for src, dst in src2dst.items():
+            self._sync(src, dst)
 
         return 0
-
 
     def _sync(self, src, dst):
         src_to_dst = {}
