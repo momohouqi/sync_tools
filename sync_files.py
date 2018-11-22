@@ -20,15 +20,24 @@ import shelve
 import argparse
 import re
 from datetime import datetime
+from collections import OrderedDict
 
 
 class SettingFile:
     """Setting file parser"""
     FROM = "FROM"
-    PORT = "PORT"
-    def __init__(self, setting_file):
+    TO = "TO"
+    GROUP_KEY = "Group"
+    GLOBAL_GROUP = "global"
+
+    def __init__(self, setting_file, groups=""):
         self._setting_file = setting_file
         self._vars = None
+        self._groups = groups
+
+    @classmethod
+    def is_group_line(cls, line):
+        return line.strip().lower().startswith(cls.GROUP_KEY.lower() + ":")
 
     @classmethod
     def is_comment_out_line(cls, line):
@@ -62,6 +71,25 @@ class SettingFile:
             var_pattern = get_var_pattern(line)
         return line
 
+    def _handle_groups(self):
+        """Return a OrderedMap: {groupName:[line0, line1,...]}"""
+        groups = OrderedDict()
+        group_name = self.GLOBAL_GROUP
+        with open(self._setting_file, "r") as f:
+            for line in f.readlines():
+                line = line.strip()
+                if self.is_group_line(line):
+                    group_name = line.split(':')[1]
+                    continue
+
+                #if not line or self.is_comment_out_line(line) or self.is_assignment_line(line):
+                if not line or self.is_comment_out_line(line):
+                    continue
+                g = groups.get(group_name, [])
+                g.append(line)
+                groups[group_name] = g
+        return groups
+
     def get_src_dst_pairs(self):
         def handle_pair_flag_in_line(line):
             line = self._replace_var_with_value(line)
@@ -71,32 +99,40 @@ class SettingFile:
         def handle_only_src_in_line(line):
             src = line
             from_path = self.get_defined_vars(self.FROM)
-            port = self.get_defined_vars(self.PORT)
-            if not line.startswith(from_path):
+            port = self.get_defined_vars(self.TO)
+            if not line.lower().startswith(from_path.lower()):
                 raise Exception("Wrong line:{}".format(line))
             #dst = os.path.join(port, 'app', line[len(from_path):])
-            dst1=port + "\\app\\" + line[len(from_path):]
+            dst1 = port + "\\" + line[len(from_path):]
             return src, dst1
 
         src2dst = {}
-        with open(self._setting_file, "r") as f:
-            for line in f.readlines():
-                line = line.strip()
-                if not line or self.is_comment_out_line(line) or self.is_assignment_line(line):
-                    continue
-                if ':::' in line:
-                    src, dst = handle_pair_flag_in_line(line)
-                else:
-                    src, dst = handle_only_src_in_line(line)
-                    print "===src:{}, dst:{}".format(src, dst)
+        groups = self._handle_groups()
 
-                src2dst[src] = dst
+        allowed_groups = self._groups.split(',')
+        if self.GLOBAL_GROUP not in allowed_groups:
+            allowed_groups.insert(0, self.GLOBAL_GROUP)
+
+        for group_name, lines in groups.items():
+            # empty allowed all groups
+            if group_name in allowed_groups:
+                for line in lines:
+                    line = line.strip()
+                    if not line or self.is_comment_out_line(line) or self.is_assignment_line(line):
+                        continue
+                    if ':::' in line:
+                        src, dst = handle_pair_flag_in_line(line)
+                    else:
+                        src, dst = handle_only_src_in_line(line)
+                        print "===src:{}, dst:{}".format(src, dst)
+
+                    src2dst[src] = dst
         return src2dst
 
 
 class SyncFiles:
     """src and dst maybe file or dir"""
-    def __init__(self, src = "", dst = "", setting_file = "", force = False):
+    def __init__(self, src = "", dst = "", setting_file = "", force = False, groups=""):
         self._init_log()
         if (src or dst) and setting_file:
             logging.error("--src, --dst can't be with --file")
@@ -110,7 +146,7 @@ class SyncFiles:
         self._vars = {}
 
         if setting_file:
-            self._setting_file_parser = SettingFile(setting_file)
+            self._setting_file_parser = SettingFile(setting_file, groups)
 
         self._init_shelve()
         self._sync_success_count = 0
@@ -199,10 +235,12 @@ def main():
     parser.add_argument("--dst",dest="dst", type=str, help = "file or dir, destination path")
     parser.add_argument("--file", dest="file", type = str, help = "each line of the file is src:::dst")
     parser.add_argument("--force", dest="force", action="store_true", help = "force copy ignore the mtime")
+    parser.add_argument("--group", dest="groups", type=str, help = "specify the sync groups, separated by comma", default="")
 
     options = parser.parse_args()
 
-    sync_files = SyncFiles(src = options.src, dst = options.dst, setting_file = options.file, force = options.force)
+    sync_files = SyncFiles(src = options.src, dst = options.dst,
+                           setting_file = options.file, force = options.force, groups=options.groups)
     return sync_files.sync()
 
 
